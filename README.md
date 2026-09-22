@@ -111,6 +111,12 @@ cache contract, records deployment-file hashes and environment metadata in
 each utterance record. Resume is rejected if settings, artifact identity, or
 sample IDs changed. New records also capture peak process RSS.
 
+Result ledgers derive a stable 12-character experiment ID from model hashes,
+settings, host, package versions, and Git revision. Absolute local paths are
+excluded. `--max-samples` is mandatory for direct benchmarks: use a positive
+value for screening or explicit zero for a complete split. Experiment plans
+also accept zero and execute jobs sequentially to avoid CPU contention.
+
 Candidate promotion uses paired utterances and predeclared gates. It reports WER
 delta and speedup with paired bootstrap 95% confidence intervals, truncation
 regression, and a machine-readable decision:
@@ -211,6 +217,15 @@ quality. Pooling after layer 2 is the best training-free speed/quality tradeoff:
 its WER deltas are statistically compatible with zero on both validation sets
 while preserving 1.37–1.51× end-to-end speedup. It advances to full evaluation.
 
+### Dynamic-length feasibility
+
+Current encoder input and positional embeddings are fixed to 3,000 mel frames,
+producing 1,500 encoder frames. Dynamic inference requires coordinated symbolic
+input dimensions, runtime positional-embedding slicing, dynamic cross-attention
+reshapes, symbolic decoder cache dimensions, unpadded feature extraction, and
+duration buckets. Quality should remain unchanged, but ONNX Runtime fused
+Attention and ORT GenAI cache compatibility require runtime validation first.
+
 ### Compression-location smoke results
 
 64 utterances per split, four threads. Values are `test-clean / test-other`.
@@ -245,7 +260,7 @@ speedup 1.957× (95% CI 1.946–1.969×), WER delta +0.57 points (CI +0.32 to
 +2.07 points (CI +1.79 to +2.31), gate fail. The reports are stored under
 `artifacts/comparisons/`.
 
-### Full recovered stride-2 results
+### Full benchmark results
 
 All runs below cover the complete LibriSpeech test split with identical decoding
 settings and four CPU threads. Latencies are milliseconds; paired efficiency
@@ -253,9 +268,18 @@ values are `test-clean / test-other`.
 
 | Config | WER clean / other | CER clean / other | RTFx clean / other | TTFT p50 clean / other | TPS clean / other | TPOT p50 clean / other | Truncated clean / other | Size MB |
 | --- | --- | --- | --- | --- | --- | --- | --- | ---: |
+| FP32 baseline | 4.72% / 10.86% | 1.97% / 5.16% | 11.13× / 10.51× | 439.80 / 427.44 | 110.7 / 114.4 | 8.85 / 8.37 | 0% / 0% | 400.8 |
 | INT8 baseline | 4.74% / 10.87% | 1.98% / 5.16% | 14.46× / 12.93× | 397.76 / 397.58 | 221.1 / 214.2 | 4.39 / 4.46 | 0% / 0% | 213.5 |
+| INT8 pool after layer 2 | 4.86% / 11.57% | 2.04% / 5.60% | 23.10× / 19.81× | 233.98 / 243.34 | 285.5 / 261.5 | 3.36 / 3.74 | 0% / 0.03% | 213.4 |
 | INT8 encoder stride 2 | 5.30% / 12.94% | 2.17% / 6.50% | 28.31× / 26.44× | 168.42 / 166.64 | 268.3 / 277.2 | 3.60 / 3.65 | 0% / 0.03% | 211.9 |
 | INT8 recovered encoder stride 2 | 5.13% / 12.52% | 2.09% / 6.76% | 27.43× / 27.12× | 174.61 / 161.64 | 261.4 / 285.9 | 3.91 / 3.38 | 0% / 0.03% | 211.8 |
+
+INT8 is 1.30× / 1.23× faster than FP32 with statistically negligible WER
+changes (+0.01 / +0.01 points). Pooling after encoder layer 2 is 1.60× / 1.53×
+faster than INT8, with +0.12 points WER on test-clean (95% CI +0.04 to +0.22)
+and +0.70 points on test-other (CI +0.29 to +1.37). It passes the predeclared
+point-estimate gate on both splits, although the test-other CI crosses the
+one-point threshold and should be treated as borderline.
 
 Against the INT8 baseline, the recovered model is 1.896× faster on test-clean
 (95% CI 1.888–1.905×) with a +0.39-point WER change (CI +0.15 to +0.59), so it

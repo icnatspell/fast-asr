@@ -189,7 +189,12 @@ def build_parser() -> argparse.ArgumentParser:
     screening_plan.add_argument(
         "--splits", nargs="+", default=["validation.clean", "validation.other"]
     )
-    screening_plan.add_argument("--max-samples", type=int, default=256)
+    screening_plan.add_argument(
+        "--max-samples",
+        type=int,
+        default=256,
+        help="Per-split limit; zero evaluates the full split.",
+    )
     screening_plan.add_argument("--threads", type=int, default=4)
     run_screening = commands.add_parser(
         "run-screening-plan", help="Run or resume a previously written screening matrix."

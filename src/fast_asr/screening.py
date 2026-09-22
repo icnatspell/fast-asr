@@ -21,8 +21,8 @@ def write_screening_plan(
     """Write an inspectable matrix without starting compute-heavy evaluation."""
     if not model_directories or not splits:
         raise ValueError("At least one model and split are required.")
-    if max_samples < 1 or threads < 1:
-        raise ValueError("max_samples and threads must be positive.")
+    if max_samples < 0 or threads < 1:
+        raise ValueError("max_samples must be non-negative; threads must be positive.")
     jobs = [
         {
             "model_directory": str(model),

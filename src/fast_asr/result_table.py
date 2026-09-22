@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import csv
+import hashlib
 import json
 from pathlib import Path
 from typing import Any
 
 RESULT_COLUMNS = (
+    "experiment_id",
     "config",
     "split",
     "utterances",
@@ -22,6 +24,25 @@ RESULT_COLUMNS = (
     "truncated_percent",
     "artifact_size_mb",
 )
+
+
+def _experiment_id(summary_path: Path) -> str:
+    """Hash artifact, settings, host, packages, and revision into stable run identity."""
+    provenance_path = summary_path.with_name("provenance.json")
+    if not provenance_path.is_file():
+        return "unknown"
+    provenance = json.loads(provenance_path.read_text(encoding="utf-8"))
+    artifact = dict(provenance.get("artifact", {}))
+    artifact.pop("location", None)
+    identity = {
+        "artifact": artifact,
+        "settings": provenance.get("settings"),
+        "host": provenance.get("host"),
+        "packages": provenance.get("packages"),
+        "git_revision": provenance.get("git_revision"),
+    }
+    encoded = json.dumps(identity, sort_keys=True, separators=(",", ":")).encode()
+    return hashlib.sha256(encoded).hexdigest()[:12]
 
 
 def _nested(report: dict[str, Any], *keys: str) -> Any:
@@ -45,6 +66,7 @@ def summary_row(summary_path: Path) -> dict[str, str | int | float | None]:
     split = summary_path.parent.name
     config = summary_path.parent.parent.name
     return {
+        "experiment_id": _experiment_id(summary_path),
         "config": config,
         "split": split,
         "utterances": report.get("utterance_count"),

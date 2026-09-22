@@ -28,6 +28,7 @@ def test_result_table_flattens_and_writes_summary(tmp_path: Path) -> None:
         encoding="utf-8",
     )
     row = summary_row(summary)
+    assert row["experiment_id"] == "unknown"
     assert row["config"] == "candidate"
     assert row["wer_percent"] == 10
     csv_path = tmp_path / "results.csv"

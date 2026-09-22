@@ -21,3 +21,17 @@ def test_screening_plan_is_candidate_by_split_matrix(tmp_path: Path) -> None:
     assert len(plan["jobs"]) == 4
     assert {job["max_samples"] for job in plan["jobs"]} == {128}
     assert {job["threads"] for job in plan["jobs"]} == {4}
+
+
+def test_screening_plan_accepts_full_split_limit(tmp_path: Path) -> None:
+    plan_path = tmp_path / "full-plan.json"
+    write_screening_plan(
+        [tmp_path / "model"],
+        tmp_path / "results",
+        plan_path,
+        splits=["test.clean"],
+        max_samples=0,
+        threads=4,
+    )
+    plan = json.loads(plan_path.read_text(encoding="utf-8"))
+    assert plan["jobs"][0]["max_samples"] == 0
