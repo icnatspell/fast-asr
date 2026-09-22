@@ -191,10 +191,10 @@ only for retained candidates.
 | --- | --- | --- | --- |
 | E1 | Encoder stride 2 | Full test-clean and test-other | Full matched evaluation complete; clean passes, other fails |
 | E2 | LoRA + teacher-distilled encoder stride 2 | Distill at 750 frames; compare with E1 | Full matched evaluation complete; clean gate passes, other gate fails |
-| E3 | Adaptive token merging | 10%, 20%, 30%, 40% reduction | Similarity-boundary reference implementation and tests complete |
+| E3 | Adaptive token merging | 10%, 20%, 30%, 40%, 50% reduction | ONNX candidates built; matched validation screening below |
 | E4 | Encoder depth reduction | 6→5→4 layers with distillation | Implementation queued |
 | E5 | Variable-length encoder input | Match baseline tokens on unpadded clips | Export investigation queued |
-| E6 | Operator profiling | Encoder/decoder p50, p95, kernel trace at four threads | Profiling queued after controlled benchmark |
+| E6 | Operator profiling | Encoder/decoder p50, p95, kernel trace at four threads | Four-thread baseline, pooling, and stride profiles complete |
 
 ### Training-free recovery screening
 
@@ -216,6 +216,76 @@ Anti-aliasing retains raw stride-2 speed but does not recover its hard-speech
 quality. Pooling after layer 2 is the best training-free speed/quality tradeoff:
 its WER deltas are statistically compatible with zero on both validation sets
 while preserving 1.37–1.51× end-to-end speedup. It advances to full evaluation.
+
+### Pooling-method comparison
+
+Matched 256-utterance validation splits; each candidate pools after encoder
+layer 2 to 750 tokens. Mean pooling remains the deployment candidate.
+
+| Method | WER clean / other | Speed vs mean clean / other |
+| --- | --- | --- |
+| Mean | 4.36% / 8.33% | 1.00× / 1.00× |
+| Max | 4.69% / 8.67% | 0.84× / 0.88× |
+| Binomial-3 | 4.51% / 9.26% | 0.84× / 0.98× |
+| Binomial-5 | 4.98% / 10.17% | 0.91× / 0.93× |
+| Left-weighted | 4.51% / 8.60% | 0.86× / 0.88× |
+| Right-weighted | 4.36% / 8.22% | 0.89× / 0.94× |
+
+Right-weighted pooling ties mean on clean and improves other by 0.11 WER
+points, but paired bootstrap does not establish a quality difference (95% CI
+-0.67 to +0.43 points) and measured end-to-end speed is lower.
+
+### Operator profile
+
+Four CPU threads, synthetic 3,000-frame mel input, three warmups and ten
+measured runs. This isolates graph cost; end-to-end LibriSpeech benchmarks
+remain the deployment speed reference.
+
+| Model | Encoder median | Decoder step median | Encoder Attention/run | Encoder MatMulNBits/run |
+| --- | ---: | ---: | ---: | ---: |
+| INT8 | 428.0 ms | 5.8 ms | 229.6 ms | 171.5 ms |
+| Pool after layer 2 | 260.3 ms | 5.6 ms | 112.1 ms | 97.8 ms |
+| Encoder stride 2 | 166.6 ms | 5.2 ms | 63.7 ms | 78.9 ms |
+
+Attention and quantized matrix multiplication dominate encoder compute.
+Layer-2 pooling cuts both substantially; further gains should target these
+operators and token count. Decoder step time changes less.
+
+### Content-aware merge candidate
+
+The ONNX merge transform scores change between adjacent layer-2 states, keeps
+the largest changes as segment boundaries, and averages states inside each
+segment. Output length stays fixed so decoder cache shapes remain compatible.
+Candidates were screened on matched 256-utterance validation-clean and
+validation-other samples with four CPU threads.
+
+| Layer-2 merge reduction | WER clean / other | RTFx clean / other |
+| --- | ---: | ---: |
+| 10% | 4.09% / 8.15% | 12.76× / 11.56× |
+| 20% | 4.05% / 8.06% | 14.10× / 13.57× |
+| 30% | 3.97% / 7.92% | 13.44× / 12.15× |
+| 40% | 3.99% / 8.20% | 15.45× / 15.57× |
+| 50% | 4.03% / 8.22% | 17.94× / 17.48× |
+
+The merge operator overhead limits end-to-end speed at lower reductions,
+despite competitive WER. At 50% reduction, speed approaches layer-2 mean
+pooling (18.54× / 17.20×) with slightly lower point-estimate WER. These are
+screening results, not full-corpus test results. Against mean pooling, paired
+bootstrap gives a clean WER difference of -0.33 points (95% CI -0.66 to
+-0.04), but the other-split difference of -0.11 points is inconclusive (95% CI
+-0.61 to +0.38). The 50% merge is 3.3% slower on clean and 1.6% faster on
+other. Retain it as a quality-oriented candidate for full testing, not a
+clear speed upgrade over mean pooling.
+
+```bash
+uv run fast-asr create-content-aware-merge-candidate \
+  --source-model-directory artifacts/olive-recipe/whisper-base-en_cpu_int8 \
+  --output-model-directory artifacts/optimizations/merge-layer2-30 \
+  --after-layer 2 --reduction-ratio 0.30
+```
+
+Dynamic segment choice uses ONNX `TopK`, `CumSum`, and `ScatterND`; operator
+support and end-to-end speed must be measured on each target runtime.
 
 ### Dynamic-length feasibility
 

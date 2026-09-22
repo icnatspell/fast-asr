@@ -10,6 +10,7 @@ from fast_asr.benchmark import benchmark_librispeech
 from fast_asr.evaluation import write_evaluation_report
 from fast_asr.output_stride import (
     create_antialiased_encoder_stride_candidate,
+    create_content_aware_merge_candidate,
     create_encoder_stride_candidate,
     create_hidden_state_pool_candidate,
     create_intermediate_pool_candidate,
@@ -45,6 +46,14 @@ def build_parser() -> argparse.ArgumentParser:
     profile.add_argument("--threads", type=int, default=4)
     profile.add_argument("--warmup-runs", type=int, default=10)
     profile.add_argument("--measured-runs", type=int, default=50)
+    artifact_profile = commands.add_parser(
+        "profile-artifact", help="Profile encoder and one cached decoder step."
+    )
+    artifact_profile.add_argument("--model-directory", type=Path, required=True)
+    artifact_profile.add_argument("--output-directory", type=Path, required=True)
+    artifact_profile.add_argument("--threads", type=int, default=4)
+    artifact_profile.add_argument("--warmup-runs", type=int, default=3)
+    artifact_profile.add_argument("--measured-runs", type=int, default=10)
 
     score = commands.add_parser(
         "score", help="Aggregate a runtime-neutral ASR evaluation JSONL file."
@@ -111,6 +120,26 @@ def build_parser() -> argparse.ArgumentParser:
     intermediate_pool.add_argument("--output-model-directory", type=Path, required=True)
     intermediate_pool.add_argument("--after-layer", type=int, choices=range(1, 6), required=True)
     intermediate_pool.add_argument("--factor", type=int, default=2)
+    intermediate_pool.add_argument(
+        "--method",
+        choices=[
+            "mean",
+            "max",
+            "binomial3",
+            "binomial5",
+            "left-weighted",
+            "right-weighted",
+        ],
+        default="mean",
+    )
+    adaptive_merge = commands.add_parser(
+        "create-content-aware-merge-candidate",
+        help="Merge similar adjacent encoder tokens at a fixed target length.",
+    )
+    adaptive_merge.add_argument("--source-model-directory", type=Path, required=True)
+    adaptive_merge.add_argument("--output-model-directory", type=Path, required=True)
+    adaptive_merge.add_argument("--after-layer", type=int, choices=range(1, 6), default=2)
+    adaptive_merge.add_argument("--reduction-ratio", type=float, required=True)
     benchmark = commands.add_parser(
         "benchmark", help="Run self-contained direct-ORT ASR evaluation."
     )
@@ -219,6 +248,19 @@ def main() -> None:
         print(output_model)
         return
 
+    if arguments.command == "profile-artifact":
+        from fast_asr.profiling import profile_model_artifact
+
+        report = profile_model_artifact(
+            arguments.model_directory,
+            arguments.output_directory,
+            threads=arguments.threads,
+            warmup_runs=arguments.warmup_runs,
+            measured_runs=arguments.measured_runs,
+        )
+        print(json.dumps(report, indent=2, sort_keys=True))
+        return
+
     if arguments.command == "write-base-en-workflow":
         write_whisper_base_en_workflow(
             arguments.workflow,
@@ -284,6 +326,17 @@ def main() -> None:
             arguments.output_model_directory,
             after_layer=arguments.after_layer,
             factor=arguments.factor,
+            method=arguments.method,
+        )
+        print(arguments.output_model_directory)
+        return
+
+    if arguments.command == "create-content-aware-merge-candidate":
+        create_content_aware_merge_candidate(
+            arguments.source_model_directory,
+            arguments.output_model_directory,
+            after_layer=arguments.after_layer,
+            reduction_ratio=arguments.reduction_ratio,
         )
         print(arguments.output_model_directory)
         return
