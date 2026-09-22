@@ -183,8 +183,8 @@ only for retained candidates.
 
 | Track | Candidate series | Gate | Status |
 | --- | --- | --- | --- |
-| E1 | Encoder stride 2 | Full test-clean and test-other | Full evaluation complete; matched INT8 test-clean complete, test-other running |
-| E2 | LoRA + teacher-distilled encoder stride 2 | Distill at 750 frames; compare with E1 | Training/merge smoke and validated INT8 export workflow pass; pilot waits for baseline |
+| E1 | Encoder stride 2 | Full test-clean and test-other | Full matched evaluation complete; clean passes, other fails |
+| E2 | LoRA + teacher-distilled encoder stride 2 | Distill at 750 frames; compare with E1 | Full matched evaluation complete; clean gate passes, other gate fails |
 | E3 | Adaptive token merging | 10%, 20%, 30%, 40% reduction | Similarity-boundary reference implementation and tests complete |
 | E4 | Encoder depth reduction | 6→5→4 layers with distillation | Implementation queued |
 | E5 | Variable-length encoder input | Match baseline tokens on unpadded clips | Export investigation queued |
@@ -224,6 +224,29 @@ speedup 1.957× (95% CI 1.946–1.969×), WER delta +0.57 points (CI +0.32 to
 +2.07 points (CI +1.79 to +2.31), gate fail. The reports are stored under
 `artifacts/comparisons/`.
 
+### Full recovered stride-2 results
+
+All runs below cover the complete LibriSpeech test split with identical decoding
+settings and four CPU threads. Latencies are milliseconds; paired efficiency
+values are `test-clean / test-other`.
+
+| Config | WER clean / other | CER clean / other | RTFx clean / other | TTFT p50 clean / other | TPS clean / other | TPOT p50 clean / other | Truncated clean / other | Size MB |
+| --- | --- | --- | --- | --- | --- | --- | --- | ---: |
+| INT8 baseline | 4.74% / 10.87% | 1.98% / 5.16% | 14.46× / 12.93× | 397.76 / 397.58 | 221.1 / 214.2 | 4.39 / 4.46 | 0% / 0% | 213.5 |
+| INT8 encoder stride 2 | 5.30% / 12.94% | 2.17% / 6.50% | 28.31× / 26.44× | 168.42 / 166.64 | 268.3 / 277.2 | 3.60 / 3.65 | 0% / 0.03% | 211.9 |
+| INT8 recovered encoder stride 2 | 5.13% / 12.52% | 2.09% / 6.76% | 27.43× / 27.12× | 174.61 / 161.64 | 261.4 / 285.9 | 3.91 / 3.38 | 0% / 0.03% | 211.8 |
+
+Against the INT8 baseline, the recovered model is 1.896× faster on test-clean
+(95% CI 1.888–1.905×) with a +0.39-point WER change (CI +0.15 to +0.59), so it
+passes the one-point WER gate. On test-other it is 2.098× faster (CI
+2.081–2.112×) with a +1.65-point WER change (CI +1.40 to +1.91), so it fails.
+
+Recovery significantly improves the unadapted stride-2 model: WER falls by
+0.18 points on test-clean (CI 0.07–0.28) and 0.41 points on test-other (CI
+0.22–0.61). The gain is nevertheless insufficient on harder speech. The next
+recovery run should therefore target validation-other explicitly rather than
+increasing stride compression.
+
 ### Recovery training
 
 `train-recovery` applies encoder compression, trains LoRA adapters with transcript,
@@ -247,8 +270,9 @@ uv run \
   --gradient-accumulation-steps 8
 ```
 
-Retained recovery checkpoints must still be exported, statically quantized, and
-evaluated with the same benchmark protocol before promotion.
+The first retained recovery checkpoint has been exported, statically quantized,
+and evaluated with the same full benchmark protocol. It passes the clean-speech
+gate but remains a recovery candidate because it fails the test-other WER gate.
 
 Validate and export a merged recovery checkpoint using the same FP32
 ModelBuilder and full-INT8 K-quant pass as the deployment baseline:

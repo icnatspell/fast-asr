@@ -33,5 +33,7 @@ def test_result_table_flattens_and_writes_summary(tmp_path: Path) -> None:
     csv_path = tmp_path / "results.csv"
     markdown_path = tmp_path / "results.md"
     write_result_tables([summary], csv_path, markdown_path)
-    assert "wer_percent" in csv_path.read_text(encoding="utf-8")
+    csv_text = csv_path.read_text(encoding="utf-8")
+    assert "wer_percent" in csv_text
+    assert "\r" not in csv_text
     assert "candidate" in markdown_path.read_text(encoding="utf-8")

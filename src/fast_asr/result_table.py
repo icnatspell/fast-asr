@@ -77,7 +77,7 @@ def write_result_tables(summary_paths: list[Path], csv_path: Path, markdown_path
         raise ValueError("At least one summary is required.")
     csv_path.parent.mkdir(parents=True, exist_ok=True)
     with csv_path.open("w", encoding="utf-8", newline="") as output:
-        writer = csv.DictWriter(output, fieldnames=RESULT_COLUMNS)
+        writer = csv.DictWriter(output, fieldnames=RESULT_COLUMNS, lineterminator="\n")
         writer.writeheader()
         writer.writerows(rows)
     markdown_path.parent.mkdir(parents=True, exist_ok=True)
