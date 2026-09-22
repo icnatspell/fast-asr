@@ -1,0 +1,302 @@
+# Fast ASR
+
+Fast ASR produces and profiles static-activation INT8 Whisper
+ONNX components on CPU. It uses Olive's Intel Neural Compressor (INC) static
+quantization pass with SmoothQuant, emitting QOperator graphs.
+
+The generated QOperator configuration is **U8 activations and S8 weights**.
+This is the correct CPU QOperator combination: signed activation QOperator is
+not a useful x86-64 configuration. It is still normally described as INT8
+deployment because the integer arithmetic and weights are eight-bit.
+
+## Installation
+
+The project uses a single uv-managed environment for its runtime and development
+dependencies.
+
+```bash
+uv sync --all-groups
+```
+
+Olive is pinned to a specific source commit: that revision contains
+`IncStaticQuantization`, which was absent from the latest tested PyPI wheel.
+
+## Starting from Olive's base.en recipe
+
+The workflow generator preserves the official recipe's source model, CPU target,
+and `ModelBuilder` FP32 export pass. It replaces that recipe's weight-only
+K-quant pass with INC static SmoothQuant.
+
+```bash
+uv run \
+  fast-asr write-base-en-workflow \
+  --workflow artifacts/whisper-base-en-smoothquant.json \
+  --calibration-directory artifacts/calibration/encoder \
+  --output-directory artifacts/whisper-base-en-smoothquant
+
+uv run \
+  olive run --config artifacts/whisper-base-en-smoothquant.json
+```
+
+Use this generated workflow only when its calibration NPZ tensors match the
+model produced by `ModelBuilder`. For debugging and for component-wise control,
+the direct `quantize` command below is preferred.
+
+## Calibration fixture contract
+
+Quantize the encoder, decoder-initial, and decoder-with-past exports separately.
+Create one `*.npz` file per representative invocation for each component. Each
+NPZ key is the exact ONNX input name; its tensor has the exact exported dtype
+and shape, including decoder cache tensors. Use held-out training/development
+audio only—never LibriSpeech test-clean or test-other—to create these inputs.
+
+For example, an encoder fixture normally contains one named log-mel input;
+decoder fixtures additionally contain token IDs and cache tensors. Verify the
+names with `session.get_inputs()` before producing fixtures.
+
+## Component quantization and profiling
+
+```bash
+uv run \
+  fast-asr quantize \
+  --model artifacts/fp32/encoder.onnx \
+  --calibration-directory artifacts/calibration/encoder \
+  --output-directory artifacts/int8/encoder \
+  --alpha 0.5 --calibration-samples 128
+
+uv run \
+  fast-asr profile \
+  --model artifacts/int8/encoder/encoder.onnx \
+  --input artifacts/calibration/encoder/00000.npz \
+  --output-directory artifacts/profiles/int8-encoder \
+  --threads 4 --warmup-runs 10 --measured-runs 50
+```
+
+`profile` defaults to four intra-op threads, one inter-op thread, batch one, and
+sequential execution. It writes a p50/p95-compatible JSON summary and the ORT
+trace. Set `--threads` explicitly in published runs and use the same fixture,
+warmup, and run count for FP32 and INT8.
+
+## Quality gates
+
+An operator profile is not an ASR result. Before accepting a candidate, run the
+complete decoder pipeline with matched generation settings and report WER on
+both LibriSpeech test-clean and test-other, alongside end-to-end latency. Keep
+SmoothQuant alpha, calibration IDs, exported-model hashes, ORT version, and
+thread count with the result.
+
+Use the reusable scorer for every runtime. Each runner writes one JSON object per
+utterance with required `utterance_id`, `reference`, `prediction`, and
+`audio_duration_s` fields. Add `e2e_latency_ms`, `encoder_latency_ms`,
+`first_token_latency_ms`, `decode_latency_ms`, `tpot_ms`, `generated_tokens`,
+`peak_rss_bytes`, `peak_vram_bytes`, `token_agreement`, `kld`,
+`timestamp_mae_ms`, `is_silence`, and `truncated` whenever available.
+
+```bash
+uv run \
+  fast-asr score \
+  --records artifacts/evaluations/candidate-records.jsonl \
+  --artifact artifacts/candidate \
+  --output artifacts/evaluations/candidate-summary.json
+```
+
+The report includes WER/CER and insertion/deletion/substitution rates, exact
+utterance-match rate, optional KLD/token-agreement diagnostics, p50/p95 stage
+latencies, RTF/RTFx, decoder tokens per second, memory/artifact size, timestamp
+coverage and MAE, silence hallucinations, and truncation rate.
+
+The direct benchmark is resumable by default. It validates the encoder/decoder
+cache contract, records deployment-file hashes and environment metadata in
+`provenance.json`, freezes ordered dataset IDs in `sample_ids.json`, and flushes
+each utterance record. Resume is rejected if settings, artifact identity, or
+sample IDs changed. New records also capture peak process RSS.
+
+Candidate promotion uses paired utterances and predeclared gates. It reports WER
+delta and speedup with paired bootstrap 95% confidence intervals, truncation
+regression, and a machine-readable decision:
+
+```bash
+uv run \
+  fast-asr compare \
+  --baseline-records artifacts/baseline/test-clean/records.jsonl \
+  --candidate-records artifacts/candidate/test-clean/records.jsonl \
+  --output artifacts/comparisons/candidate-test-clean.json \
+  --max-wer-regression 0.01 --min-speedup 1.10 \
+  --max-truncation-regression 0.005
+```
+
+## Optimization roadmap
+
+Every optimization below is a separate experiment. **Do not promote a latency
+result without running the same end-to-end evaluation for that artifact**:
+matched decoding, LibriSpeech test-clean and test-other WER, RTFx, and the
+four-thread component profile. Evaluate combinations again; individual results
+do not prove that their gains compose.
+
+Use two evaluation stages. During implementation, reject clearly bad variants on
+a fixed, documented subset of **LibriSpeech dev-clean and dev-other**. Do not
+tune against the test sets. Every retained variant and every reported
+combination must then run the complete test-clean and test-other protocol below.
+The development subset is a preflight check, never a paper-comparable result.
+
+| Priority | Candidate | Expected benefit | Evaluation requirement |
+| --- | --- | --- | --- |
+| P0 | FP32 export | Quality reference | Full test-clean and test-other WER/CER reference. |
+| P0 | Official full INT8 K-quant | Quantized deployment baseline | Full test-clean and test-other; retain per-utterance predictions. |
+| P1 (deferred) | Static SmoothQuant / selective precision | Alternative quantization schemes | Do not run in the current study. |
+| P2 | Output-side stride-2 audio-token reduction | Reduce decoder cross-attention work | Check WER, deletions, and timestamp behaviour separately. |
+| P2 | Adjacent encoder-token merging | Adaptive token reduction | Compare 10/20/40% reduction at matched measured latency. |
+| P3 | LiteASR low-rank encoder projections | Reduce encoder dense arithmetic | Recalibrate per model and benchmark ONNX kernels, not FLOPs alone. |
+| P3 | Speculative decoding | Reduce serial decoder steps | Verify exact greedy-token agreement with the INT8 verifier. |
+
+Record every result with model revision, provider, package lock, calibration
+sample IDs, decoding parameters, WER delta, RTFx, p50/p95 latency, and peak
+memory. The current Olive recipe evaluator is a 64-item test-clean smoke test;
+use full test-clean and test-other before drawing a quality conclusion.
+
+## Experiment ledger
+
+The smoke protocol is 64 utterances per test split and is diagnostic only. Full
+test-clean/test-other is required before reporting a result externally. `—`
+means the current Olive evaluator does not emit that metric; the reusable JSONL
+scorer will fill it once the runtime runner records per-utterance timings.
+
+All paired efficiency/diagnostic values below are `test-clean / test-other`.
+Latency values are milliseconds; size is decimal MB. WER and CER use Whisper's
+basic text normalization.
+
+| Config | Encoder frames | WER clean | WER other | CER clean / other | RTFx | TTFT p50 | TTFT p95 | TPS | TPOT p50 | TPOT p95 | Truncated | Size MB |
+| --- | ---: | ---: | ---: | --- | --- | --- | --- | --- | --- | --- | --- | ---: |
+| FP32 | 1500 | 6.62% | 8.78% | 3.32% / 4.74% | 21.59× / 20.29× | 436.95 / 434.58 | 944.16 / 851.09 | 111.3 / 114.5 | 8.85 / 8.57 | 9.98 / 9.55 | 0% / 0% | 400.8 |
+| INT8 K-quant | 1500 | 6.47% | 8.73% | 3.28% / 4.76% | 32.47× / 29.78× | 398.07 / 398.50 | 783.76 / 789.95 | 226.3 / 225.7 | 4.30 / 4.36 | 4.94 / 4.82 | 0% / 0% | 213.5 |
+| INT8 output stride 2 | 750 | 5.56% | 8.47% | 1.91% / 4.23% | 32.92× / 28.76× | 424.34 / 426.20 | 783.35 / 845.85 | 251.6 / 232.9 | 3.77 / 4.14 | 5.37 / 5.30 | 0% / 0% | 213.5 |
+| INT8 output stride 3 | 500 | 5.53% | 26.46% | 2.02% / 18.45% | 32.94× / 27.92× | 416.51 / 420.91 | 850.88 / 858.90 | 257.5 / 258.5 | 3.81 / 3.82 | 4.64 / 4.50 | 0% / 4.69% | 213.5 |
+| INT8 output stride 4 | 375 | 26.50% | 16.42% | 20.81% / 11.86% | 31.82× / 31.20× | 404.25 / 404.49 | 839.58 / 794.08 | 278.0 / 282.2 | 3.41 / 3.46 | 4.09 / 3.99 | 4.69% / 1.56% | 213.5 |
+| INT8 encoder stride 2 | 750 | 6.08% | 10.04% | 2.22% / 5.19% | 50.85× / 45.20× | 175.73 / 182.02 | 341.27 / 332.22 | 253.1 / 239.8 | 3.86 / 3.99 | 4.77 / 5.24 | 0% / 0% | 211.9 |
+| INT8 encoder stride 2 + output stride 2 | 375 | 23.98% | 33.92% | 16.48% / 26.04% | 51.78× / 47.67× | 170.70 / 165.05 | 355.81 / 336.31 | 292.2 / 308.0 | 3.31 / 3.05 | 3.88 / 3.52 | 3.12% / 4.69% | 211.9 |
+
+## Next experiment program
+
+Each track is developed and evaluated independently before combinations are
+attempted. `dev-clean`/`dev-other` are the selection sets; test splits are used
+only for retained candidates.
+
+| Track | Candidate series | Gate | Status |
+| --- | --- | --- | --- |
+| E1 | Encoder stride 2 | Full test-clean and test-other | Full evaluation complete; matched INT8 test-clean complete, test-other running |
+| E2 | LoRA + teacher-distilled encoder stride 2 | Distill at 750 frames; compare with E1 | Training/merge smoke and validated INT8 export workflow pass; pilot waits for baseline |
+| E3 | Adaptive token merging | 10%, 20%, 30%, 40% reduction | Similarity-boundary reference implementation and tests complete |
+| E4 | Encoder depth reduction | 6→5→4 layers with distillation | Implementation queued |
+| E5 | Variable-length encoder input | Match baseline tokens on unpadded clips | Export investigation queued |
+| E6 | Operator profiling | Encoder/decoder p50, p95, kernel trace at four threads | Profiling queued after controlled benchmark |
+
+### Compression-location smoke results
+
+64 utterances per split, four threads. Values are `test-clean / test-other`.
+
+| Candidate | Final frames | WER | RTFx | Truncated | Gate |
+| --- | ---: | --- | --- | --- | --- |
+| Hidden pool 2 | 750 | 5.43% / 8.45% | 34.94× / 32.41× | 0% / 0% | Pass |
+| Hidden pool 3 | 500 | 5.51% / 8.93% | 36.55× / 33.67× | 0% / 0% | Pass |
+| Hidden pool 4 | 375 | 16.77% / 20.19% | 36.00× / 33.38× | 1.56% / 1.56% | Reject |
+| Encoder stride 3 | 500 | 14.15% / 53.96% | 60.74× / 44.19× | 1.56% / 9.38% | Recovery target |
+| Encoder stride 4 | 375 | 29.39% / 74.93% | 64.28× / 48.78× | 3.12% / 9.38% | Reject |
+| Encoder stride 2 + hidden pool 2 | 375 | 8.05% / 39.69% | 58.55× / 46.97× | 0% / 4.69% | Recovery target |
+| Encoder stride 2 + hidden pool 3 | 250 | 63.03% / 70.40% | 46.29× / 42.82× | 9.38% / 9.38% | Reject |
+| Encoder stride 3 + hidden pool 2 | 250 | 26.99% / 65.85% | 69.53× / 51.38× | 1.56% / 7.81% | Reject |
+| Encoder stride 3 + hidden pool 4 | 125 | 317.26% / 182.49% | 27.00× / 42.31× | 48.44% / 21.88% | Reject |
+| Encoder stride 4 + hidden pool 3 | 125 | 209.73% / 232.28% | 37.47× / 33.85× | 29.69% / 31.25% | Reject |
+
+Full encoder-stride-2 result: test-clean WER 5.30%, CER 2.17%, RTFx
+28.31×; test-other WER 12.94%, CER 6.50%, RTFx 26.44×. A full INT8
+baseline run is required for matched full-split speed and WER deltas.
+
+Matched full INT8 evaluation is complete. Test-clean: WER 4.74%, CER 1.98%,
+RTFx 14.46×, TTFT p50 397.76 ms, and decoder throughput 221.15 tokens/s.
+Test-other: WER 10.87%, CER 5.16%, RTFx 12.93×, TTFT p50 397.58 ms, and
+decoder throughput 214.21 tokens/s. Encoder stride 2 is 1.96× / 2.04× faster
+with +0.57 / +2.07 percentage-point WER changes on clean / other. It therefore
+needs recovery before promotion under the current one-point WER gate.
+
+Paired 1,000-sample bootstrap confirms the split-dependent result. Test-clean:
+speedup 1.957× (95% CI 1.946–1.969×), WER delta +0.57 points (CI +0.32 to
++0.77), gate pass. Test-other: speedup 2.045× (CI 2.030–2.056×), WER delta
++2.07 points (CI +1.79 to +2.31), gate fail. The reports are stored under
+`artifacts/comparisons/`.
+
+### Recovery training
+
+`train-recovery` applies encoder compression, trains LoRA adapters with transcript,
+teacher-logit, and encoder-hidden-state losses, merges the adapters, and saves a
+self-contained Transformers checkpoint plus `recovery_config.json`. A one-step
+end-to-end smoke run passes. The first 250-step stride-2 pilot uses 2,000 streamed
+LibriSpeech train-clean-100 examples and starts after the active full INT8 benchmark.
+
+Training audio is streamed and transformed per batch; it is never materialized
+as decoded audio in memory. Every 50 optimizer steps, generated-transcript WER
+is measured on three fixed, disjoint 64-utterance sets: a train-clean-100
+holdout, validation-clean, and validation-other. Trainer checkpoints contain
+intermediate metric history; the completed run also writes
+`training_metrics.json`. Interrupted runs resume from the latest checkpoint.
+
+```bash
+uv run \
+  fast-asr train-recovery \
+  --output-directory artifacts/recovery-training/encoder-stride-2-pilot \
+  --encoder-stride-factor 2 --max-steps 250 --max-train-samples 2000 \
+  --gradient-accumulation-steps 8
+```
+
+Retained recovery checkpoints must still be exported, statically quantized, and
+evaluated with the same benchmark protocol before promotion.
+
+Validate and export a merged recovery checkpoint using the same FP32
+ModelBuilder and full-INT8 K-quant pass as the deployment baseline:
+
+```bash
+uv run \
+  fast-asr write-recovery-export-workflow \
+  --checkpoint-directory artifacts/recovery-training/encoder-stride-2-pilot \
+  --workflow artifacts/recovery-training/encoder-stride-2-pilot/export.json \
+  --output-directory artifacts/recovery-training/encoder-stride-2-pilot/int8
+```
+
+Development screening is represented by a resumable model-by-split plan. The
+defaults are 256 samples each from LibriSpeech validation-clean and
+validation-other at four threads:
+
+```bash
+uv run \
+  fast-asr write-screening-plan \
+  --model-directories artifacts/candidate-a artifacts/candidate-b \
+  --output-root artifacts/dev-screening --plan artifacts/dev-screening/plan.json
+
+uv run \
+  fast-asr run-screening-plan \
+  --plan artifacts/dev-screening/plan.json
+```
+
+`write-result-table` converts any collection of versioned `summary.json` files
+to stable CSV and Markdown. The current generated ledger lives under
+`artifacts/results/benchmark-ledger.{csv,md}`.
+
+`refresh-result-table --results-root artifacts` discovers every summary and
+regenerates both formats without maintaining a manual path list.
+
+Generate a fresh full evaluator for any artifact instead of copying a model-specific
+JSON file:
+
+```bash
+uv run \
+  fast-asr write-full-evaluation-workflow \
+  --model-directory artifacts/candidate \
+  --workflow artifacts/evaluations/candidate-full-eval.json
+```
+
+## Development
+
+```bash
+uv run ruff check .
+uv run pyrefly check
+uv run pytest
+```

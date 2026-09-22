@@ -1,0 +1,24 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+.ruff_cache/
+.venv/
+
+# Tool and model caches
+.olive-cache/
+.cache/
+
+# Generated models and benchmark runs. Keep compact, curated result ledgers.
+artifacts/*
+!artifacts/results/
+artifacts/results/*
+!artifacts/results/benchmark-ledger.csv
+!artifacts/results/benchmark-ledger.md
+
+# Local runtime files
+*.log
+*.ses

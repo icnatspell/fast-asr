@@ -1,0 +1,28 @@
+{
+  "input_model": {
+    "type": "HfModel",
+    "model_path": "openai/whisper-base.en",
+    "task": "automatic-speech-recognition"
+  },
+  "systems": {
+    "local_system": {
+      "type": "LocalSystem",
+      "accelerators": [
+        {
+          "device": "cpu",
+          "execution_providers": ["CPUExecutionProvider"]
+        }
+      ]
+    }
+  },
+  "engine": {
+    "target": "local_system"
+  },
+  "passes": {
+    "builder": {
+      "type": "ModelBuilder",
+      "precision": "fp32"
+    }
+  },
+  "output_dir": "artifacts/olive-recipe/whisper-base-en_cpu_fp32"
+}

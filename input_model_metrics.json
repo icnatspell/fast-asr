@@ -1,0 +1,12 @@
+{
+    "speech_accuracy-wer": {
+        "value": 0.06544826179742813,
+        "priority": 1,
+        "higher_is_better": false
+    },
+    "speech_accuracy-rtfx": {
+        "value": 33.03,
+        "priority": 2,
+        "higher_is_better": true
+    }
+}

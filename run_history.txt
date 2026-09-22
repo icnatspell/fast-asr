@@ -1,0 +1,1 @@
+[RunHistory(model_id='0539275b', parent_model_id=None, from_pass=None, duration_sec=None, metrics='{\n  "speech_accuracy-wer": 0.06544826179742813,\n  "speech_accuracy-rtfx": 33.03\n}')]

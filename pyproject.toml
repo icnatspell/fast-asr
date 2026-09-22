@@ -1,0 +1,59 @@
+[project]
+name = "fast-asr"
+version = "0.1.0"
+description = "Reproducible optimization and benchmarking for fast automatic speech recognition"
+readme = "README.md"
+authors = [
+    { name = "icnatspell", email = "spellicnat@gmail.com" }
+]
+requires-python = ">=3.13"
+dependencies = [
+    "accelerate>=1.10.0",
+    "datasets==3.6.0",
+    "evaluate>=0.4.6",
+    "jiwer>=4.0.0",
+    "librosa>=0.11.0",
+    "neural-compressor[pt]>=3.7",
+    "numpy>=2.4.0",
+    "olive-ai",
+    "onnx>=1.20.1",
+    "onnxruntime>=1.24.1",
+    "onnxruntime-genai==0.16.0",
+    "peft>=0.18.0",
+    "py-cpuinfo>=9.0.0",
+    "requests>=2.32.0",
+    "soundfile>=0.13.0",
+    "torch>=2.10.0",
+    "transformers>=5.17,<6",
+]
+
+[project.urls]
+Repository = "https://github.com/icnatspell/fast-asr"
+Issues = "https://github.com/icnatspell/fast-asr/issues"
+
+[project.scripts]
+fast-asr = "fast_asr:main"
+
+[build-system]
+requires = ["uv_build>=0.11.29,<0.12.0"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "pyrefly>=1.3.1",
+    "pytest>=9.0.0",
+    "ruff>=0.16.8",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py313"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+
+[tool.pyrefly]
+project-includes = ["src"]
+
+[tool.uv.sources]
+olive-ai = { git = "https://github.com/microsoft/Olive.git", rev = "2fbeaf4316930d62bf7b85658ccc6e752d4b6f4c" }
