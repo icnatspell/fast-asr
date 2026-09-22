@@ -6,9 +6,30 @@ import json
 import shutil
 import tempfile
 from pathlib import Path
+from typing import Literal
 
+import numpy as np
 import onnx
 from onnx import TensorProto, helper, numpy_helper
+
+AntiAliasKernel = Literal["average", "binomial3", "binomial5"]
+
+_ANTI_ALIAS_KERNELS: dict[AntiAliasKernel, tuple[float, ...]] = {
+    "average": (0.5, 0.5),
+    "binomial3": (0.25, 0.5, 0.25),
+    "binomial5": (0.0625, 0.25, 0.375, 0.25, 0.0625),
+}
+
+
+def _load_external_model_safely(model_path: Path) -> onnx.ModelProto:
+    """Load external tensors through private copies, avoiding hard-link rejection."""
+    with tempfile.TemporaryDirectory() as temporary_directory:
+        temporary_model = Path(temporary_directory) / model_path.name
+        shutil.copyfile(model_path, temporary_model)
+        data_path = model_path.with_suffix(model_path.suffix + ".data")
+        if data_path.is_file():
+            shutil.copyfile(data_path, temporary_model.with_suffix(model_path.suffix + ".data"))
+        return onnx.load(temporary_model)
 
 
 def _unique_name(model: onnx.ModelProto, stem: str) -> str:
@@ -241,13 +262,7 @@ def create_encoder_stride_candidate(
     if not source_encoder.is_file() or not source_decoder.is_file():
         raise FileNotFoundError("Expected encoder.onnx and decoder.onnx in the source artifact.")
 
-    with tempfile.TemporaryDirectory() as temporary_directory:
-        temporary_encoder = Path(temporary_directory) / "encoder.onnx"
-        shutil.copyfile(source_encoder, temporary_encoder)
-        shutil.copyfile(
-            source_encoder.with_suffix(".onnx.data"), temporary_encoder.with_suffix(".onnx.data")
-        )
-        encoder = onnx.load(temporary_encoder)
+    encoder = _load_external_model_safely(source_encoder)
     decoder = onnx.load(source_decoder, load_external_data=False)
     shutil.copytree(
         source_model_directory,
@@ -303,6 +318,228 @@ def create_encoder_stride_candidate(
     # Intermediate ValueInfo entries were inferred for the original 1500-frame
     # graph. ORT can safely re-infer them, whereas retaining them makes the new
     # positional Add appear dimensionally inconsistent.
+    del encoder.graph.value_info[:]
+    onnx.save_model(
+        encoder,
+        output_model_directory / "encoder.onnx",
+        save_as_external_data=True,
+        all_tensors_to_one_file=True,
+        location="encoder.onnx.data",
+        size_threshold=0,
+    )
+    onnx.save(decoder, output_model_directory / "decoder.onnx")
+    onnx.checker.check_model(output_model_directory / "encoder.onnx")
+    onnx.checker.check_model(output_model_directory / "decoder.onnx")
+
+
+def create_antialiased_encoder_stride_candidate(
+    source_model_directory: Path,
+    output_model_directory: Path,
+    *,
+    kernel: AntiAliasKernel = "binomial3",
+) -> None:
+    """Halve Conv2 input resolution using fixed depthwise low-pass filtering.
+
+    Original Conv2 stride remains two, producing 750 encoder frames. Unlike
+    directly changing stride to four, every input phase contributes.
+    """
+    if output_model_directory.exists():
+        raise FileExistsError(f"Refusing to overwrite {output_model_directory}.")
+    coefficients = _ANTI_ALIAS_KERNELS[kernel]
+    source_encoder = source_model_directory / "encoder.onnx"
+    source_decoder = source_model_directory / "decoder.onnx"
+    if not source_encoder.is_file() or not source_decoder.is_file():
+        raise FileNotFoundError("Expected encoder.onnx and decoder.onnx in source artifact.")
+
+    encoder = _load_external_model_safely(source_encoder)
+    decoder = onnx.load(source_decoder, load_external_data=False)
+    shutil.copytree(
+        source_model_directory,
+        output_model_directory,
+        ignore=shutil.ignore_patterns("encoder.onnx", "encoder.onnx.data"),
+    )
+    conv2 = next((node for node in encoder.graph.node if node.name.endswith("/Conv_2")), None)
+    if conv2 is None:
+        raise ValueError("Could not find Whisper's second encoder convolution.")
+    conv2_weight = next(
+        (item for item in encoder.graph.initializer if item.name == conv2.input[1]), None
+    )
+    if conv2_weight is None:
+        raise ValueError("Could not find second encoder convolution weights.")
+    channels = numpy_helper.to_array(conv2_weight).shape[1]
+    filter_name = _unique_name(encoder, f"fast_asr_antialias_{kernel}_weight")
+    filtered_name = _unique_name(encoder, f"fast_asr_antialias_{kernel}_output")
+    weights = np.tile(np.asarray(coefficients, dtype=np.float32), (channels, 1, 1))
+    encoder.graph.initializer.append(numpy_helper.from_array(weights, filter_name))
+    padding = len(coefficients) // 2
+    pads = [padding, padding]
+    if len(coefficients) % 2 == 0:
+        pads[1] -= 1
+    filter_node = helper.make_node(
+        "Conv",
+        [conv2.input[0], filter_name],
+        [filtered_name],
+        name=f"/fast_asr/Antialias_{kernel}",
+        group=channels,
+        kernel_shape=[len(coefficients)],
+        pads=pads,
+        strides=[2],
+    )
+    conv2_index = list(encoder.graph.node).index(conv2)
+    encoder.graph.node.insert(conv2_index, filter_node)
+    conv2.input[0] = filtered_name
+
+    position = next(
+        (
+            item
+            for item in encoder.graph.initializer
+            if item.name == "encoder.embed_positions.weight"
+        ),
+        None,
+    )
+    if position is None:
+        raise ValueError("Could not find Whisper encoder positional embeddings.")
+    position_values = numpy_helper.to_array(position)
+    if position_values.shape[0] % 2:
+        raise ValueError("Positional embedding length must divide evenly by two.")
+    sequence_length = position_values.shape[0] // 2
+    encoder.graph.initializer.remove(position)
+    encoder.graph.initializer.append(
+        numpy_helper.from_array(position_values[::2].copy(), position.name)
+    )
+    for node in encoder.graph.node:
+        if node.op_type != "Constant":
+            continue
+        for attribute in node.attribute:
+            if attribute.name != "value" or attribute.type != onnx.AttributeProto.TENSOR:
+                continue
+            values = numpy_helper.to_array(attribute.t)
+            if values.ndim == 1 and values.size == 4 and values[1] == position_values.shape[0]:
+                replacement = values.copy()
+                replacement[1] = sequence_length
+                attribute.t.CopyFrom(numpy_helper.from_array(replacement))
+    for output in encoder.graph.output:
+        if output.name == "hidden_states":
+            _set_dimension(output, axis=1, dimension=sequence_length)
+        elif output.name.startswith(("present_key_cross_", "present_value_cross_")):
+            _set_dimension(output, axis=2, dimension=sequence_length)
+    for input_value in decoder.graph.input:
+        if input_value.name.startswith(("past_key_cross_", "past_value_cross_")):
+            _set_dimension(input_value, axis=2, dimension=sequence_length)
+    _update_max_source_positions(output_model_directory, sequence_length)
+    del encoder.graph.value_info[:]
+    onnx.save_model(
+        encoder,
+        output_model_directory / "encoder.onnx",
+        save_as_external_data=True,
+        all_tensors_to_one_file=True,
+        location="encoder.onnx.data",
+        size_threshold=0,
+    )
+    onnx.save(decoder, output_model_directory / "decoder.onnx")
+    onnx.checker.check_model(output_model_directory / "encoder.onnx")
+    onnx.checker.check_model(output_model_directory / "decoder.onnx")
+
+
+def _insert_mean_pool_after_output(
+    model: onnx.ModelProto, producer: onnx.NodeProto, output_name: str, factor: int
+) -> list[onnx.NodeProto]:
+    """Replace one [batch, sequence, hidden] output with pooled equivalent."""
+    output_index = next(index for index, name in enumerate(producer.output) if name == output_name)
+    prefix = _unique_name(model, f"{output_name}_pool_{factor}")
+    raw_name = f"{prefix}_raw"
+    channels_first = f"{prefix}_channels_first"
+    pooled = f"{prefix}_pooled"
+    producer.output[output_index] = raw_name
+    return [
+        helper.make_node(
+            "Transpose",
+            [raw_name],
+            [channels_first],
+            perm=[0, 2, 1],
+            name=f"{prefix}_transpose_in",
+        ),
+        helper.make_node(
+            "AveragePool",
+            [channels_first],
+            [pooled],
+            kernel_shape=[factor],
+            strides=[factor],
+            name=f"{prefix}_average",
+        ),
+        helper.make_node(
+            "Transpose",
+            [pooled],
+            [output_name],
+            perm=[0, 2, 1],
+            name=f"{prefix}_transpose_out",
+        ),
+    ]
+
+
+def create_intermediate_pool_candidate(
+    source_model_directory: Path,
+    output_model_directory: Path,
+    *,
+    after_layer: int,
+    factor: int = 2,
+) -> None:
+    """Mean-pool encoder tokens after a one-indexed count of completed layers."""
+    if after_layer not in range(1, 6):
+        raise ValueError("after_layer must be between 1 and 5 for Whisper base.")
+    if factor < 2:
+        raise ValueError("factor must be at least 2.")
+    if output_model_directory.exists():
+        raise FileExistsError(f"Refusing to overwrite {output_model_directory}.")
+    source_encoder = source_model_directory / "encoder.onnx"
+    source_decoder = source_model_directory / "decoder.onnx"
+    if not source_encoder.is_file() or not source_decoder.is_file():
+        raise FileNotFoundError("Expected encoder.onnx and decoder.onnx in source artifact.")
+
+    encoder = _load_external_model_safely(source_encoder)
+    decoder = onnx.load(source_decoder, load_external_data=False)
+    shutil.copytree(
+        source_model_directory,
+        output_model_directory,
+        ignore=shutil.ignore_patterns("encoder.onnx", "encoder.onnx.data"),
+    )
+    boundary_name = f"/model/layers.{after_layer}/input_layernorm/SkipLayerNorm"
+    boundary = next((node for node in encoder.graph.node if node.name == boundary_name), None)
+    if boundary is None or len(boundary.output) < 4:
+        raise ValueError(f"Could not find supported encoder boundary {boundary_name!r}.")
+    boundary_index = list(encoder.graph.node).index(boundary)
+    inserted: list[onnx.NodeProto] = []
+    for output_name in (boundary.output[0], boundary.output[3]):
+        if not output_name:
+            raise ValueError(f"Boundary {boundary_name!r} lacks required residual outputs.")
+        inserted.extend(_insert_mean_pool_after_output(encoder, boundary, output_name, factor))
+    for offset, node in enumerate(inserted, start=1):
+        encoder.graph.node.insert(boundary_index + offset, node)
+
+    hidden_output = next(value for value in encoder.graph.output if value.name == "hidden_states")
+    source_length = hidden_output.type.tensor_type.shape.dim[1].dim_value
+    if not source_length or source_length % factor:
+        raise ValueError("Hidden-state length must divide evenly by factor.")
+    target_length = source_length // factor
+    for node in encoder.graph.node:
+        if node.op_type != "Constant":
+            continue
+        for attribute in node.attribute:
+            if attribute.name != "value" or attribute.type != onnx.AttributeProto.TENSOR:
+                continue
+            values = numpy_helper.to_array(attribute.t)
+            if values.ndim == 1 and values.size == 4 and values[1] == source_length:
+                replacement = values.copy()
+                replacement[1] = target_length
+                attribute.t.CopyFrom(numpy_helper.from_array(replacement))
+    _set_dimension(hidden_output, axis=1, dimension=target_length)
+    for output in encoder.graph.output:
+        if output.name.startswith(("present_key_cross_", "present_value_cross_")):
+            _set_dimension(output, axis=2, dimension=target_length)
+    for input_value in decoder.graph.input:
+        if input_value.name.startswith(("past_key_cross_", "past_value_cross_")):
+            _set_dimension(input_value, axis=2, dimension=target_length)
+    _update_max_source_positions(output_model_directory, target_length)
     del encoder.graph.value_info[:]
     onnx.save_model(
         encoder,

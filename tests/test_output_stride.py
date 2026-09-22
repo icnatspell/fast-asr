@@ -1,9 +1,11 @@
+import os
 from pathlib import Path
 
+import numpy as np
 import onnx
 from onnx import TensorProto, helper
 
-from fast_asr.output_stride import create_output_stride_candidate
+from fast_asr.output_stride import _load_external_model_safely, create_output_stride_candidate
 
 
 def _write_model(
@@ -51,3 +53,23 @@ def test_create_output_stride_candidate_updates_all_cross_attention_outputs(tmp_
     }
     assert sum(node.op_type == "Slice" for node in encoder.graph.node) == 3
     assert decoder.graph.input[0].type.tensor_type.shape.dim[2].dim_value == 750
+
+
+def test_safe_loader_accepts_hardlinked_external_data(tmp_path: Path) -> None:
+    tensor = onnx.numpy_helper.from_array(np.ones((32,), dtype=np.float32), "weight")
+    output = helper.make_tensor_value_info("weight", TensorProto.FLOAT, [32])
+    model = helper.make_model(helper.make_graph([], "external", [], [output], [tensor]))
+    model_path = tmp_path / "encoder.onnx"
+    onnx.save_model(
+        model,
+        model_path,
+        save_as_external_data=True,
+        all_tensors_to_one_file=True,
+        location="encoder.onnx.data",
+        size_threshold=0,
+    )
+    os.link(tmp_path / "encoder.onnx.data", tmp_path / "hardlink-backup.data")
+
+    loaded = _load_external_model_safely(model_path)
+
+    assert onnx.numpy_helper.to_array(loaded.graph.initializer[0]).shape == (32,)

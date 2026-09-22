@@ -9,8 +9,10 @@ from pathlib import Path
 from fast_asr.benchmark import benchmark_librispeech
 from fast_asr.evaluation import write_evaluation_report
 from fast_asr.output_stride import (
+    create_antialiased_encoder_stride_candidate,
     create_encoder_stride_candidate,
     create_hidden_state_pool_candidate,
+    create_intermediate_pool_candidate,
     create_output_stride_candidate,
 )
 from fast_asr.profiling import profile_cpu_model
@@ -92,6 +94,23 @@ def build_parser() -> argparse.ArgumentParser:
     hidden_pool.add_argument("--source-model-directory", type=Path, required=True)
     hidden_pool.add_argument("--output-model-directory", type=Path, required=True)
     hidden_pool.add_argument("--factor", type=int, default=2)
+    antialiased_stride = commands.add_parser(
+        "create-antialiased-encoder-stride-candidate",
+        help="Create stride-2 encoder using fixed low-pass filtering before subsampling.",
+    )
+    antialiased_stride.add_argument("--source-model-directory", type=Path, required=True)
+    antialiased_stride.add_argument("--output-model-directory", type=Path, required=True)
+    antialiased_stride.add_argument(
+        "--kernel", choices=["average", "binomial3", "binomial5"], default="binomial3"
+    )
+    intermediate_pool = commands.add_parser(
+        "create-intermediate-pool-candidate",
+        help="Mean-pool tokens after a selected Whisper encoder layer.",
+    )
+    intermediate_pool.add_argument("--source-model-directory", type=Path, required=True)
+    intermediate_pool.add_argument("--output-model-directory", type=Path, required=True)
+    intermediate_pool.add_argument("--after-layer", type=int, choices=range(1, 6), required=True)
+    intermediate_pool.add_argument("--factor", type=int, default=2)
     benchmark = commands.add_parser(
         "benchmark", help="Run self-contained direct-ORT ASR evaluation."
     )
@@ -101,7 +120,7 @@ def build_parser() -> argparse.ArgumentParser:
     benchmark.add_argument(
         "--max-samples",
         type=int,
-        default=64,
+        required=True,
         help="Per-split limit; zero evaluates the full split.",
     )
     benchmark.add_argument("--threads", type=int, default=4)
@@ -240,6 +259,25 @@ def main() -> None:
         create_hidden_state_pool_candidate(
             arguments.source_model_directory,
             arguments.output_model_directory,
+            factor=arguments.factor,
+        )
+        print(arguments.output_model_directory)
+        return
+
+    if arguments.command == "create-antialiased-encoder-stride-candidate":
+        create_antialiased_encoder_stride_candidate(
+            arguments.source_model_directory,
+            arguments.output_model_directory,
+            kernel=arguments.kernel,
+        )
+        print(arguments.output_model_directory)
+        return
+
+    if arguments.command == "create-intermediate-pool-candidate":
+        create_intermediate_pool_candidate(
+            arguments.source_model_directory,
+            arguments.output_model_directory,
+            after_layer=arguments.after_layer,
             factor=arguments.factor,
         )
         print(arguments.output_model_directory)

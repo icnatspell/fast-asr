@@ -190,6 +190,27 @@ only for retained candidates.
 | E5 | Variable-length encoder input | Match baseline tokens on unpadded clips | Export investigation queued |
 | E6 | Operator profiling | Encoder/decoder p50, p95, kernel trace at four threads | Profiling queued after controlled benchmark |
 
+### Training-free recovery screening
+
+Matched 256-utterance validation splits, four CPU threads. Paired speedups use
+the INT8 baseline. All intermediate-pooling candidates pass the one-point WER
+and 1.1× speed gates.
+
+| Candidate | WER clean / other | RTFx clean / other | Speedup clean / other | WER delta clean / other |
+| --- | --- | --- | --- | --- |
+| INT8 baseline | 4.12% / 8.22% | 12.30× / 12.51× | — | — |
+| Anti-alias average | 4.94% / 10.28% | 24.17× / 24.34× | 1.97× / 1.95× | +0.82 / +2.07 points |
+| Anti-alias binomial-3 | 5.04% / 10.22% | 24.20× / 23.84× | 1.97× / 1.91× | +0.93 / +2.00 points |
+| Anti-alias binomial-5 | 5.14% / 10.40% | 24.84× / 24.44× | 2.02× / 1.95× | +1.03 / +2.18 points |
+| Pool after layer 2 | 4.36% / 8.33% | 18.54× / 17.20× | 1.51× / 1.37× | +0.25 / +0.11 points |
+| Pool after layer 3 | 4.28% / 8.17% | 16.76× / 16.03× | 1.36× / 1.28× | +0.16 / -0.05 points |
+| Pool after layer 4 | 4.20% / 8.31% | 14.71× / 14.57× | 1.20× / 1.17× | +0.08 / +0.09 points |
+
+Anti-aliasing retains raw stride-2 speed but does not recover its hard-speech
+quality. Pooling after layer 2 is the best training-free speed/quality tradeoff:
+its WER deltas are statistically compatible with zero on both validation sets
+while preserving 1.37–1.51× end-to-end speedup. It advances to full evaluation.
+
 ### Compression-location smoke results
 
 64 utterances per split, four threads. Values are `test-clean / test-other`.
